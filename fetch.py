@@ -1,0 +1,1 @@
+from PyQt6 import QApplication, QLabel, QWidget
