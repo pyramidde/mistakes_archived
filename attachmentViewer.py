@@ -2,11 +2,11 @@
 
 from pathlib import Path
 
-from PyQt6.QtCore import QBuffer, QIODevice, Qt
+from PyQt6.QtCore import QBuffer, QEvent, QIODevice, QPointF, Qt, QTimer
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
     QHBoxLayout, QLabel, QPushButton, QScrollArea, QStackedWidget,
-    QTextEdit, QVBoxLayout, QWidget,
+    QSpinBox, QTextEdit, QVBoxLayout, QWidget,
 )
 
 try:
@@ -22,6 +22,7 @@ class AttachmentViewer(QWidget):
         self.image = QPixmap()
         self.image_scale = 1.0
         self.pdf_buffer = None
+        self.auto_fit_images = True
         layout = QVBoxLayout(self)
         controls = QHBoxLayout()
         for title, action in [("Zoom +", self.zoom_in), ("Zoom −", self.zoom_out),
@@ -30,6 +31,23 @@ class AttachmentViewer(QWidget):
             button.clicked.connect(action)
             controls.addWidget(button)
         layout.addLayout(controls)
+        navigation = QHBoxLayout()
+        self.previous_page_button = QPushButton("Previous")
+        self.previous_page_button.clicked.connect(self.previous_page)
+        self.page_input = QSpinBox()
+        self.page_input.setRange(1, 1)
+        self.page_input.setPrefix("Page ")
+        self.page_input.valueChanged.connect(self.go_to_page)
+        self.page_count = QLabel("/ 0")
+        self.next_page_button = QPushButton("Next")
+        self.next_page_button.clicked.connect(self.next_page)
+        navigation.addWidget(self.previous_page_button)
+        navigation.addWidget(self.page_input)
+        navigation.addWidget(self.page_count)
+        navigation.addWidget(self.next_page_button)
+        self.pdf_navigation = QWidget()
+        self.pdf_navigation.setLayout(navigation)
+        layout.addWidget(self.pdf_navigation)
         self.views = QStackedWidget()
         layout.addWidget(self.views)
         self.message = QLabel()
@@ -41,6 +59,7 @@ class AttachmentViewer(QWidget):
         self.image_scroll = QScrollArea()
         self.image_scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.image_scroll.setWidget(self.image_label)
+        self.image_scroll.viewport().installEventFilter(self)
         self.views.addWidget(self.image_scroll)
         self.text_view = QTextEdit()
         self.text_view.setReadOnly(True)
@@ -53,10 +72,13 @@ class AttachmentViewer(QWidget):
             self.pdf_view.setPageMode(QPdfView.PageMode.MultiPage)
             self.pdf_view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
             self.pdf_document.statusChanged.connect(self.pdf_status_changed)
+            self.pdf_document.pageCountChanged.connect(self.update_pdf_pages)
+            self.pdf_view.pageNavigator().currentPageChanged.connect(self.sync_pdf_page)
             self.views.addWidget(self.pdf_view)
         self.clear()
 
     def clear(self):
+        self.pdf_navigation.hide()
         if self.pdf_view is not None:
             self.pdf_document.close()
         if self.pdf_buffer is not None:
@@ -83,6 +105,8 @@ class AttachmentViewer(QWidget):
             self.pdf_buffer.setData(data)
             self.pdf_buffer.open(QIODevice.OpenModeFlag.ReadOnly)
             self.views.setCurrentWidget(self.pdf_view)
+            self.pdf_navigation.show()
+            self.pdf_view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
             self.pdf_document.load(self.pdf_buffer)
             return
         if self.image.loadFromData(data):
@@ -96,10 +120,43 @@ class AttachmentViewer(QWidget):
 
     def pdf_status_changed(self, status):
         if status == QPdfDocument.Status.Error:
+            self.pdf_navigation.hide()
             self.show_message("This PDF could not be opened. It may be damaged or password-protected.")
+
+    def update_pdf_pages(self, count):
+        self.page_input.blockSignals(True)
+        self.page_input.setRange(1, max(1, count))
+        self.page_input.setValue(1)
+        self.page_input.blockSignals(False)
+        self.page_count.setText(f"/ {count}")
+        self.page_input.setEnabled(count > 0)
+        self.previous_page_button.setEnabled(count > 1)
+        self.next_page_button.setEnabled(count > 1)
+
+    def sync_pdf_page(self, page):
+        self.page_input.blockSignals(True)
+        self.page_input.setValue(page + 1)
+        self.page_input.blockSignals(False)
+
+    def go_to_page(self, page):
+        if self.pdf_view is not None and self.pdf_document.pageCount():
+            self.pdf_view.pageNavigator().jump(page - 1, QPointF())
+
+    def previous_page(self):
+        self.page_input.setValue(self.page_input.value() - 1)
+
+    def next_page(self):
+        self.page_input.setValue(self.page_input.value() + 1)
+
+    def eventFilter(self, watched, event):
+        if (watched is self.image_scroll.viewport() and event.type() == QEvent.Type.Resize
+                and self.auto_fit_images):
+            QTimer.singleShot(0, self.fit_width)
+        return super().eventFilter(watched, event)
 
     def fit_width(self):
         if self.views.currentWidget() is self.image_scroll and not self.image.isNull():
+            self.auto_fit_images = True
             self.image_scale = max(0.05, (self.image_scroll.viewport().width() - 20) / self.image.width())
             self.update_image()
         elif self.pdf_view is not None and self.views.currentWidget() is self.pdf_view:
@@ -115,6 +172,7 @@ class AttachmentViewer(QWidget):
 
     def zoom(self, factor):
         if self.views.currentWidget() is self.image_scroll:
+            self.auto_fit_images = False
             self.image_scale = min(8.0, max(0.05, self.image_scale * factor))
             self.update_image()
         elif self.pdf_view is not None and self.views.currentWidget() is self.pdf_view:
