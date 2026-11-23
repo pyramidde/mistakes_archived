@@ -1,9 +1,11 @@
 
 from pathlib import Path
 import sys
+from io import BytesIO
+from pypdf import PdfReader, PdfWriter
 
 from PyQt6.QtCore import QBuffer, QEvent, QIODevice, QPointF, Qt, QTimer
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtGui import QPixmap, QTransform
 from PyQt6.QtWidgets import (
     QHBoxLayout, QLabel, QPushButton, QScrollArea, QStackedWidget,
     QSpinBox, QTextEdit, QVBoxLayout, QWidget,
@@ -28,6 +30,16 @@ class AttachmentViewer(QWidget):
         fit_button = QPushButton("Fit width")
         fit_button.clicked.connect(self.fit_width)
         controls.addWidget(fit_button)
+        self.rotate_left_button = QPushButton("↶")
+        self.rotate_right_button = QPushButton("↷")
+        for button, degrees, label in (
+                (self.rotate_left_button, -90, "Rotate left"),
+                (self.rotate_right_button, 90, "Rotate right")):
+            button.setToolTip(label)
+            button.setAccessibleName(label)
+            button.setFixedWidth(36)
+            button.clicked.connect(lambda checked=False, angle=degrees: self.rotate(angle))
+            controls.addWidget(button)
         controls.addStretch()
         layout.addLayout(controls)
         navigation = QHBoxLayout()
@@ -78,6 +90,11 @@ class AttachmentViewer(QWidget):
         self.clear()
 
     def clear(self):
+        self.rotation = 0
+        self.original_pdf = None
+        self.original_image = QPixmap()
+        self.rotate_left_button.setEnabled(False)
+        self.rotate_right_button.setEnabled(False)
         self.pdf_navigation.hide()
         if self.pdf_view is not None:
             self.pdf_document.close()
@@ -107,9 +124,13 @@ class AttachmentViewer(QWidget):
             self.views.setCurrentWidget(self.pdf_view)
             self.pdf_navigation.show()
             self.pdf_view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
+            self.original_pdf = bytes(data)
             self.pdf_document.load(self.pdf_buffer)
             return
         if self.image.loadFromData(data):
+            self.original_image = QPixmap(self.image)
+            self.rotate_left_button.setEnabled(True)
+            self.rotate_right_button.setEnabled(True)
             self.views.setCurrentWidget(self.image_scroll)
             self.fit_width()
         elif extension in (".txt", ".md", ".csv", ".json", ".log", ".py"):
@@ -119,9 +140,49 @@ class AttachmentViewer(QWidget):
             self.show_message("No built-in viewer for this file type. You can still save a copy.")
 
     def pdf_status_changed(self, status):
+        ready = status == QPdfDocument.Status.Ready
+        self.rotate_left_button.setEnabled(ready)
+        self.rotate_right_button.setEnabled(ready)
         if status == QPdfDocument.Status.Error:
             self.pdf_navigation.hide()
             self.show_message("This PDF could not be opened. It may be damaged or password-protected.")
+
+    def rotate(self, degrees):
+        angle = (self.rotation + degrees) % 360
+        if self.views.currentWidget() is self.image_scroll and not self.original_image.isNull():
+            self.rotation = angle
+            self.image = self.original_image.transformed(QTransform().rotate(angle))
+            if self.auto_fit_images:
+                self.fit_width()
+            else:
+                self.update_image()
+        elif self.views.currentWidget() is self.pdf_view and self.original_pdf:
+            page = self.pdf_view.pageNavigator().currentPage()
+            mode = self.pdf_view.zoomMode()
+            scale = self.pdf_view.zoomFactor()
+            try:
+                reader = PdfReader(BytesIO(self.original_pdf))
+                writer = PdfWriter()
+                writer.clone_document_from_reader(reader)
+                for pdf_page in writer.pages:
+                    pdf_page.rotate(angle)
+                output = BytesIO()
+                writer.write(output)
+            except Exception as error:
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.warning(self, "Could not rotate PDF", str(error))
+                return
+            self.rotation = angle
+            self.pdf_document.close()
+            self.pdf_buffer.close()
+            self.pdf_buffer = QBuffer()
+            self.pdf_buffer.setData(output.getvalue())
+            self.pdf_buffer.open(QIODevice.OpenModeFlag.ReadOnly)
+            self.pdf_document.load(self.pdf_buffer)
+            self.pdf_view.setZoomMode(mode)
+            if mode == QPdfView.ZoomMode.Custom:
+                self.pdf_view.setZoomFactor(scale)
+            self.pdf_view.pageNavigator().jump(page, QPointF())
 
     def update_pdf_pages(self, count):
         self.page_input.blockSignals(True)
