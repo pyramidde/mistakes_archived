@@ -140,10 +140,74 @@ class MistakesArchive(QWidget):
         buttons.addWidget(self.delete_button)
         buttons.addWidget(back)
         layout.addLayout(buttons)
+        archive_buttons = QHBoxLayout()
+        self.export_archive_button = QPushButton("Export archive…")
+        self.export_archive_button.clicked.connect(self.export_archive)
+        self.import_archive_button = QPushButton("Import archive…")
+        self.import_archive_button.clicked.connect(self.import_archive)
+        archive_buttons.addWidget(self.export_archive_button)
+        archive_buttons.addWidget(self.import_archive_button)
+        layout.addLayout(archive_buttons)
         self.clear_database_button = QPushButton("Delete all archive data…")
         self.clear_database_button.clicked.connect(self.delete_all_archive_data)
         layout.addWidget(self.clear_database_button, alignment=Qt.AlignmentFlag.AlignRight)
         self.pages.addWidget(self.manage_page)
+
+    def export_archive(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export archive", "Mistakes Archive.maarchive",
+            "Mistakes Archive (*.maarchive)",
+        )
+        if not path:
+            return
+        if not Path(path).suffix:
+            path += ".maarchive"
+        try:
+            databaseConnect.export_archive(path)
+        except (sqlite3.Error, ValueError, OSError, TypeError) as error:
+            self.manage_status.setText(f"Could not export: {error}")
+            return
+        self.manage_status.setText(f"Archive exported to {path}")
+
+    def import_archive(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import archive", "", "Mistakes Archive (*.maarchive)",
+        )
+        if not path:
+            return
+        try:
+            databaseConnect.read_archive(path)
+        except (ValueError, OSError, TypeError, OverflowError) as error:
+            self.manage_status.setText(f"Could not import: {error}")
+            return
+        answer = QMessageBox.question(
+            self, "Replace archive?",
+            "Importing replaces all current subjects, mistakes and attachments. "
+            "A backup of the current archive will be saved first. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            backup = databaseConnect.import_archive(path)
+        except (sqlite3.Error, ValueError, OSError, TypeError, OverflowError) as error:
+            self.manage_status.setText(f"Could not import: {error}")
+            return
+        self.current_course_id = None
+        self.editing_mistake_id = None
+        self.course_mistakes = []
+        self.mistake_list.clear()
+        self.mistake_details.clear()
+        self.attachment_list.clear()
+        self.attachment_viewer.clear()
+        self.mistakes_title.clear()
+        self.clear_files()
+        self.course_input.clear()
+        self.subject_list.clear()
+        self.manage_list.clear()
+        self.refresh_subjects()
+        self.manage_status.setText(f"Archive imported. Previous archive backed up to {backup}")
 
     def show_manage_page(self):
         self.refresh_subjects()

@@ -385,3 +385,133 @@ def insert_subject(subject, level):
         return True
     finally:
         connection.close()
+
+
+# A portable data-only format: importing never executes SQL from a backup.
+ARCHIVE_COLUMNS = {
+    'Subjects': ('SubjectID', 'Subject'),
+    'Course': ('CourseID', 'SubjectID', 'Level'),
+    'Paper': ('PaperID', 'CourseID', 'PaperNumber', 'QuestionNumber', 'QuestionText', 'Difficulty', 'MaxMarks'),
+    'Exercise': ('ExerciseID', 'CourseID', 'QuestionNumber', 'QuestionText', 'Difficulty', 'MaxMarks'),
+    'Mistake': ('MistakeID', 'PaperID', 'MarksEarned', 'ExerciseID'),
+    'Attachment': ('AttachmentID', 'MistakeID', 'FileName', 'FileData'),
+}
+
+
+def export_archive(path):
+    """Save a consistent snapshot, including attachments, without changing the database."""
+    import base64
+    import json
+    import os
+    import tempfile
+    destination = Path(path).resolve()
+    if destination == Path(DB_PATH).resolve():
+        raise ValueError('Choose a backup filename, not the active database.')
+    connection = connect_database()
+    try:
+        connection.execute('BEGIN')
+        tables = {}
+        for table, columns in ARCHIVE_COLUMNS.items():
+            rows = [list(row) for row in connection.execute(
+                f"SELECT {', '.join(columns)} FROM {table} ORDER BY {columns[0]}"
+            )]
+            if table == 'Attachment':
+                for row in rows:
+                    row[-1] = base64.b64encode(row[-1]).decode('ascii')
+            tables[table] = rows
+    finally:
+        connection.close()
+    payload = {'format': 'MistakesArchive', 'version': 1, 'tables': tables}
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=destination.parent,
+                                         suffix='.tmp', delete=False) as output:
+            temp_path = Path(output.name)
+            json.dump(payload, output, ensure_ascii=False, allow_nan=False)
+        os.replace(temp_path, destination)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink()
+
+
+def read_archive(path):
+    """Validate data and relationships before replacing any records."""
+    import base64
+    import json
+    import math
+    with open(path, encoding='utf-8') as source:
+        payload = json.load(source)
+    if (not isinstance(payload, dict) or payload.get('format') != 'MistakesArchive'
+            or payload.get('version') != 1):
+        raise ValueError('This is not a supported Mistakes Archive export.')
+    tables = payload.get('tables')
+    if not isinstance(tables, dict) or set(tables) != set(ARCHIVE_COLUMNS):
+        raise ValueError('The archive is missing required tables.')
+    text_columns = {'Subject', 'Level', 'QuestionNumber', 'QuestionText', 'FileName'}
+    ids = {}
+    for table, columns in ARCHIVE_COLUMNS.items():
+        rows = tables[table]
+        if not isinstance(rows, list):
+            raise ValueError(f'Invalid rows in {table}.')
+        ids[table] = set()
+        for row in rows:
+            if not isinstance(row, list) or len(row) != len(columns):
+                raise ValueError(f'Invalid record in {table}.')
+            for column, value in zip(columns, row):
+                if value is None and column in ('PaperID', 'ExerciseID') and table == 'Mistake':
+                    continue
+                if column in text_columns or column == 'FileData':
+                    valid = isinstance(value, str)
+                else:
+                    valid = type(value) in (int, float) and math.isfinite(value)
+                    if column.endswith('ID'):
+                        valid = valid and value == int(value)
+                if not valid:
+                    raise ValueError(f'Invalid {table}.{column}.')
+            if row[0] in ids[table]:
+                raise ValueError(f'Duplicate ID in {table}.')
+            ids[table].add(row[0])
+            if table == 'Attachment':
+                try:
+                    row[-1] = base64.b64decode(row[-1], validate=True)
+                except (ValueError, TypeError) as error:
+                    raise ValueError('Invalid attachment data.') from error
+    links = [('Course', 1, 'Subjects'), ('Paper', 1, 'Course'),
+             ('Exercise', 1, 'Course'), ('Mistake', 1, 'Paper'),
+             ('Mistake', 3, 'Exercise'), ('Attachment', 1, 'Mistake')]
+    for table, column, parent in links:
+        for row in tables[table]:
+            if row[column] is not None and row[column] not in ids[parent]:
+                raise ValueError(f'{table} references a missing {parent} record.')
+    for row in tables['Mistake']:
+        if (row[1] is None) == (row[3] is None):
+            raise ValueError('Each mistake must reference exactly one paper or exercise.')
+    return tables
+
+
+def import_archive(path):
+    """Replace data atomically and return the location of the pre-import backup."""
+    from datetime import datetime
+    from uuid import uuid4
+    tables = read_archive(path)
+    backup_dir = Path(DB_PATH).resolve().parent / 'backups'
+    backup_dir.mkdir(exist_ok=True)
+    backup = backup_dir / f"before-import-{datetime.now():%Y%m%d-%H%M%S}-{uuid4().hex[:8]}.maarchive"
+    export_archive(backup)
+    connection = connect_database()
+    try:
+        with connection:
+            connection.execute('BEGIN IMMEDIATE')
+            for table in reversed(ARCHIVE_COLUMNS):
+                connection.execute(f'DELETE FROM {table}')
+            for table, columns in ARCHIVE_COLUMNS.items():
+                placeholders = ', '.join('?' for _ in columns)
+                connection.executemany(
+                    f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})",
+                    tables[table],
+                )
+            if connection.execute('PRAGMA foreign_key_check').fetchall():
+                raise ValueError('Imported records failed the database relationship check.')
+    finally:
+        connection.close()
+    return backup
