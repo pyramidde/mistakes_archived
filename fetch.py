@@ -52,8 +52,15 @@ class MistakesArchive(QWidget):
 
     def setup_window(self):
         self.setWindowTitle("Mistakes Archive")
-        self.setWindowIcon(QIcon(str(Path(__file__).with_name("mistakes_archived.png"))))
         self.resize(900, 600)
+        icon_path = Path(__file__).with_name("mistakes_archived.png")
+        icon = QIcon(str(icon_path))
+        if not icon.isNull():
+            QApplication.instance().setWindowIcon(icon)  # Application icon
+            self.setWindowIcon(icon)                    # Window icon
+        else:
+            print(f"Could not load icon: {icon_path}")
+
         layout = QVBoxLayout(self)
         self.pages = QStackedWidget()
         layout.addWidget(self.pages)

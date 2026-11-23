@@ -1,4 +1,3 @@
-"""Reusable in-app viewer for saved images, PDFs and plain text files."""
 
 from pathlib import Path
 
