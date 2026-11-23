@@ -133,8 +133,8 @@ def insert_paper_mistake(course_id, paper_number, question_number, question_text
 
 
 def insert_mistake(course_id, source_type, paper_number, question_number, question_text,
-                   difficulty, max_marks, marks_earned, file_paths=()):
-    """Store either a Paper or an Exercise, its Mistake and attachments."""
+                   difficulty, max_marks, marks_earned, file_paths=(), *, mistake_id=None):
+    """Store or update either a Paper or an Exercise, its Mistake and attachments."""
     if source_type not in ('Paper', 'Exercise'):
         raise ValueError('Choose Paper or Exercise.')
     question_number = (question_number or "").strip() or "N/A"
@@ -163,13 +163,21 @@ def insert_mistake(course_id, source_type, paper_number, question_number, questi
                 "SELECT CourseID FROM Course WHERE CourseID = ?", (course_id,)
             ).fetchone() is None:
                 raise ValueError("That course no longer exists. Reopen this page and select a course.")
+            old_source = None
+            if mistake_id is not None:
+                old_source = connection.execute(
+                    "SELECT PaperID, ExerciseID FROM Mistake WHERE MistakeID = ?", (mistake_id,)
+                ).fetchone()
+                if old_source is None:
+                    raise ValueError("That mistake no longer exists.")
             # Explicit IDs work with both INTEGER and existing NUMERIC keys.
             source_id = connection.execute(
                 f"SELECT COALESCE(MAX({source_type}ID), 0) + 1 FROM {source_type}"
             ).fetchone()[0]
-            mistake_id = connection.execute(
-                "SELECT COALESCE(MAX(MistakeID), 0) + 1 FROM Mistake"
-            ).fetchone()[0]
+            if mistake_id is None:
+                mistake_id = connection.execute(
+                    "SELECT COALESCE(MAX(MistakeID), 0) + 1 FROM Mistake"
+                ).fetchone()[0]
             if source_type == 'Paper':
                 connection.execute('''
                     INSERT INTO Paper (PaperID, CourseID, PaperNumber, QuestionNumber,
@@ -183,11 +191,25 @@ def insert_mistake(course_id, source_type, paper_number, question_number, questi
                                           QuestionText, Difficulty, MaxMarks)
                     VALUES (?, ?, ?, ?, ?, ?)
                 ''', (source_id, course_id, question_number, question_text, difficulty, max_marks))
-            connection.execute(
-                "INSERT INTO Mistake (MistakeID, PaperID, MarksEarned, ExerciseID) VALUES (?, ?, ?, ?)",
-                (mistake_id, source_id if source_type == 'Paper' else None,
-                 marks_earned, source_id if source_type == 'Exercise' else None),
-            )
+            paper_id = source_id if source_type == 'Paper' else None
+            exercise_id = source_id if source_type == 'Exercise' else None
+            if old_source is None:
+                connection.execute(
+                    "INSERT INTO Mistake (MistakeID, PaperID, MarksEarned, ExerciseID) VALUES (?, ?, ?, ?)",
+                    (mistake_id, paper_id, marks_earned, exercise_id),
+                )
+            else:
+                # Keep the mistake ID and attachments; isolate edits from shared questions.
+                connection.execute(
+                    "UPDATE Mistake SET PaperID = ?, MarksEarned = ?, ExerciseID = ? WHERE MistakeID = ?",
+                    (paper_id, marks_earned, exercise_id, mistake_id),
+                )
+                for table, old_id in zip(('Paper', 'Exercise'), old_source):
+                    connection.execute(
+                        f"DELETE FROM {table} WHERE {table}ID = ? "
+                        f"AND NOT EXISTS (SELECT 1 FROM Mistake WHERE {table}ID = ?)",
+                        (old_id, old_id),
+                    )
             connection.executemany(
                 "INSERT INTO Attachment (MistakeID, FileName, FileData) VALUES (?, ?, ?)",
                 [(mistake_id, name, data) for name, data in files],

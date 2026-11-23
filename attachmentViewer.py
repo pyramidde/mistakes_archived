@@ -1,5 +1,6 @@
 
 from pathlib import Path
+import sys
 
 from PyQt6.QtCore import QBuffer, QEvent, QIODevice, QPointF, Qt, QTimer
 from PyQt6.QtGui import QPixmap
@@ -24,11 +25,10 @@ class AttachmentViewer(QWidget):
         self.auto_fit_images = True
         layout = QVBoxLayout(self)
         controls = QHBoxLayout()
-        for title, action in [("Zoom +", self.zoom_in), ("Zoom −", self.zoom_out),
-                              ("Fit width", self.fit_width)]:
-            button = QPushButton(title)
-            button.clicked.connect(action)
-            controls.addWidget(button)
+        fit_button = QPushButton("Fit width")
+        fit_button.clicked.connect(self.fit_width)
+        controls.addWidget(fit_button)
+        controls.addStretch()
         layout.addLayout(controls)
         navigation = QHBoxLayout()
         self.previous_page_button = QPushButton("Previous")
@@ -58,7 +58,7 @@ class AttachmentViewer(QWidget):
         self.image_scroll = QScrollArea()
         self.image_scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.image_scroll.setWidget(self.image_label)
-        self.image_scroll.viewport().installEventFilter(self)
+        self.install_zoom_controls(self.image_scroll)
         self.views.addWidget(self.image_scroll)
         self.text_view = QTextEdit()
         self.text_view.setReadOnly(True)
@@ -68,6 +68,7 @@ class AttachmentViewer(QWidget):
             self.pdf_document = QPdfDocument(self)
             self.pdf_view = QPdfView(self)
             self.pdf_view.setDocument(self.pdf_document)
+            self.install_zoom_controls(self.pdf_view)
             self.pdf_view.setPageMode(QPdfView.PageMode.MultiPage)
             self.pdf_view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
             self.pdf_document.statusChanged.connect(self.pdf_status_changed)
@@ -147,7 +148,36 @@ class AttachmentViewer(QWidget):
     def next_page(self):
         self.page_input.setValue(self.page_input.value() + 1)
 
+    def install_zoom_controls(self, view):
+        viewport = view.viewport()
+        viewport.installEventFilter(self)
+        # macOS supplies native trackpad gestures. Other platforms can also
+        # deliver touch pinches through Qt's gesture recognizer.
+        if sys.platform != "darwin":
+            viewport.grabGesture(Qt.GestureType.PinchGesture)
+
     def eventFilter(self, watched, event):
+        active = self.views.currentWidget()
+        if active in (self.image_scroll, self.pdf_view) and watched is active.viewport():
+            if event.type() == QEvent.Type.Wheel:
+                modifiers = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier
+                if event.modifiers() & modifiers:
+                    delta = event.pixelDelta().y() or event.angleDelta().y()
+                    if delta:
+                        self.zoom(1.25 ** (max(-480, min(480, delta)) / 120))
+                    event.accept()
+                    return True
+            elif event.type() == QEvent.Type.NativeGesture:
+                if event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
+                    self.zoom(max(0.01, 1.0 + event.value()))
+                    event.accept()
+                    return True
+            elif event.type() == QEvent.Type.Gesture:
+                pinch = event.gesture(Qt.GestureType.PinchGesture)
+                if pinch is not None:
+                    self.zoom(pinch.scaleFactor() / (pinch.lastScaleFactor() or 1.0))
+                    event.accept(pinch)
+                    return True
         if (watched is self.image_scroll.viewport() and event.type() == QEvent.Type.Resize
                 and self.auto_fit_images):
             QTimer.singleShot(0, self.fit_width)
@@ -179,8 +209,3 @@ class AttachmentViewer(QWidget):
             self.pdf_view.setZoomMode(QPdfView.ZoomMode.Custom)
             self.pdf_view.setZoomFactor(min(8.0, max(0.05, scale * factor)))
 
-    def zoom_in(self):
-        self.zoom(1.25)
-
-    def zoom_out(self):
-        self.zoom(0.8)

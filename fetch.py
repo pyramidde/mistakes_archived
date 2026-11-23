@@ -1,17 +1,48 @@
-
 import sqlite3
 import sys
 from pathlib import Path
 
 import databaseConnect
 from attachmentViewer import AttachmentViewer
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QIcon, QIntValidator
 from PyQt6.QtWidgets import (
     QApplication, QButtonGroup, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
     QSplitter, QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
 )
+
+
+class AttachmentDropList(QListWidget):
+    files_dropped = pyqtSignal(list)
+
+    def __init__(self):
+        super().__init__()
+        self.setAcceptDrops(True)
+
+    @staticmethod
+    def local_files(event):
+        return [url.toLocalFile() for url in event.mimeData().urls()
+                if url.isLocalFile() and Path(url.toLocalFile()).is_file()]
+
+    def dragEnterEvent(self, event):
+        if self.local_files(event):
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        self.dragEnterEvent(event)
+
+    def dropEvent(self, event):
+        paths = self.local_files(event)
+        if paths:
+            self.files_dropped.emit(paths)
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+        else:
+            event.ignore()
 
 
 def make_number_input(maximum):
@@ -42,6 +73,7 @@ class MistakesArchive(QWidget):
         self.pending_files = []
         self.course_mistakes = []
         self.current_course_id = None
+        self.editing_mistake_id = None
         self.setup_window()
         self.create_home_page()
         self.create_manage_page()
@@ -68,6 +100,9 @@ class MistakesArchive(QWidget):
     def create_home_page(self):
         self.home_page = QWidget()
         self.home_panel, layout = make_centered_panel(self.home_page)
+        credit = QLabel("Made by Daniel Matthew Panganiban")
+        credit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(credit)
         layout.addWidget(QLabel("Subjects and levels"))
         self.subject_list = QListWidget()
         self.subject_list.setMinimumHeight(140)
@@ -143,7 +178,8 @@ class MistakesArchive(QWidget):
     def create_paper_page(self):
         self.paper_page = QWidget()
         self.paper_panel, layout = make_centered_panel(self.paper_page, 1000, 560)
-        layout.addWidget(QLabel("Add mistake"))
+        self.paper_heading = QLabel("Add mistake")
+        layout.addWidget(self.paper_heading)
         layout.addWidget(QLabel("Optional text becomes N/A; blank numbers become 0 (unspecified)."))
 
         # Put the small fields on the left and question/files on the right.
@@ -184,12 +220,14 @@ class MistakesArchive(QWidget):
         self.question_text_input = QTextEdit()
         self.question_text_input.setPlaceholderText("Type a question, attach a file/image, or both.")
         right.addWidget(self.question_text_input)
-        self.pending_file_list = QListWidget()
+        right.addWidget(QLabel("Attachments — drop files here"))
+        self.pending_file_list = AttachmentDropList()
+        self.pending_file_list.files_dropped.connect(self.add_files)
         right.addWidget(self.pending_file_list)
         file_buttons = QHBoxLayout()
         self.attach_button = QPushButton("Attach files / images")
         self.attach_button.clicked.connect(self.choose_files)
-        self.clear_files_button = QPushButton("Clear files")
+        self.clear_files_button = QPushButton("Clear new files")
         self.clear_files_button.clicked.connect(self.clear_files)
         file_buttons.addWidget(self.attach_button)
         file_buttons.addWidget(self.clear_files_button)
@@ -204,7 +242,7 @@ class MistakesArchive(QWidget):
         self.paper_insert_button = QPushButton("Insert")
         self.paper_insert_button.clicked.connect(self.insert_paper_mistake)
         self.paper_back_button = QPushButton("Back")
-        self.paper_back_button.clicked.connect(self.show_home_page)
+        self.paper_back_button.clicked.connect(self.return_to_course)
         buttons.addWidget(self.paper_insert_button)
         buttons.addWidget(self.paper_back_button)
         layout.addLayout(buttons)
@@ -219,8 +257,12 @@ class MistakesArchive(QWidget):
             self, "Attach files or images", "",
             "All files (*);;Images (*.png *.jpg *.jpeg *.webp *.bmp);;PDF files (*.pdf)",
         )
+        self.add_files(paths)
+
+    def add_files(self, paths):
         for path in paths:
-            if path not in self.pending_files:
+            path = str(Path(path).resolve())
+            if Path(path).is_file() and path not in self.pending_files:
                 self.pending_files.append(path)
                 self.pending_file_list.addItem(Path(path).name)
 
@@ -228,7 +270,43 @@ class MistakesArchive(QWidget):
         self.pending_files.clear()
         self.pending_file_list.clear()
 
+    def return_to_course(self):
+        self.editing_mistake_id = None
+        self.clear_files()
+        item = QListWidgetItem(self.mistakes_title.text())
+        item.setData(Qt.ItemDataRole.UserRole, self.current_course_id)
+        self.show_course_mistakes(item)
+
+    def edit_selected_mistake(self):
+        item = self.mistake_list.currentItem()
+        if item is None:
+            self.mistakes_status.setText("Select a mistake to edit first.")
+            return
+        row = item.data(Qt.ItemDataRole.UserRole)
+        self.show_paper_page()
+        self.editing_mistake_id = row['MistakeID']
+        self.paper_heading.setText(f"Edit mistake #{self.editing_mistake_id}")
+        self.paper_insert_button.setText("Save changes")
+        self.paper_type_button.setChecked(row['SourceType'] == 'Paper')
+        self.exercise_type_button.setChecked(row['SourceType'] == 'Exercise')
+        for field, key in ((self.paper_number_input, 'PaperNumber'),
+                           (self.question_number_input, 'QuestionNumber'),
+                           (self.difficulty_input, 'Difficulty'),
+                           (self.max_marks_input, 'MaxMarks'),
+                           (self.marks_earned_input, 'MarksEarned')):
+            field.setText(str(row[key] if row[key] is not None else ''))
+        self.question_text_input.setPlainText(row['QuestionText'] or '')
+        self.paper_status.setText("Existing attachments are kept. You can attach additional files.")
+
     def show_paper_page(self):
+        self.editing_mistake_id = None
+        self.paper_heading.setText("Add mistake")
+        self.paper_insert_button.setText("Insert")
+        self.clear_files()
+        for field in (self.paper_number_input, self.question_number_input,
+                      self.difficulty_input, self.max_marks_input, self.marks_earned_input):
+            field.clear()
+        self.question_text_input.clear()
         selected = self.subject_list.currentItem()
         selected_id = (selected.data(Qt.ItemDataRole.UserRole)
                        if selected else self.course_input.currentData())
@@ -242,7 +320,7 @@ class MistakesArchive(QWidget):
             return
         for course_id, subject, level in courses:
             self.course_input.addItem(f"{subject} — {level}", course_id)
-        index = self.course_input.findData(selected_id)
+        index = self.course_input.findData(self.current_course_id if self.current_course_id is not None else selected_id)
         if index >= 0:
             self.course_input.setCurrentIndex(index)
         self.paper_insert_button.setEnabled(bool(courses))
@@ -269,9 +347,10 @@ class MistakesArchive(QWidget):
                 int(self.max_marks_input.text().strip() or 0),
                 int(self.marks_earned_input.text().strip() or 0),
                 self.pending_files,
+                mistake_id=self.editing_mistake_id,
             )
         except (sqlite3.Error, ValueError, OSError) as error:
-            self.paper_status.setText(f"Could not insert: {error}")
+            self.paper_status.setText(f"Could not save: {error}")
             return
         self.subject_summary.clear()
         self.question_number_input.clear()
@@ -280,7 +359,7 @@ class MistakesArchive(QWidget):
             field.clear()
         self.paper_number_input.clear()
         self.clear_files()
-        self.show_home_page()
+        self.return_to_course()
 
     def create_mistakes_page(self):
         self.mistakes_page = QWidget()
@@ -326,6 +405,9 @@ class MistakesArchive(QWidget):
         self.mistake_list = QListWidget()
         self.mistake_list.currentItemChanged.connect(self.show_mistake_details)
         details.addWidget(self.mistake_list, 1)
+        self.edit_mistake_button = QPushButton("Edit selected mistake")
+        self.edit_mistake_button.clicked.connect(self.edit_selected_mistake)
+        details.addWidget(self.edit_mistake_button)
         self.delete_mistake_button = QPushButton("Delete selected mistake")
         self.delete_mistake_button.clicked.connect(self.delete_selected_mistake)
         details.addWidget(self.delete_mistake_button)
