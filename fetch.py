@@ -1,4 +1,3 @@
-"""A plain PyQt6 mistakes archive. Database work lives in databaseConnect.py."""
 
 import sqlite3
 import sys
@@ -53,7 +52,7 @@ class MistakesArchive(QWidget):
 
     def setup_window(self):
         self.setWindowTitle("Mistakes Archive")
-        self.setWindowIcon(QIcon(str(Path(__file__).with_name("ma-logo-v2.png"))))
+        self.setWindowIcon(QIcon(str(Path(__file__).with_name("mistakes_archived.png"))))
         self.resize(900, 600)
         layout = QVBoxLayout(self)
         self.pages = QStackedWidget()
